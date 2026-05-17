@@ -1,4 +1,29 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { initializeApp } from "firebase/app";
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signInWithPopup,
+  GoogleAuthProvider,
+  signOut,
+  updateProfile,
+} from "firebase/auth";
+
+/* ── Firebase config ── */
+const firebaseConfig = {
+  apiKey: "AIzaSyC-9-HjxA_mRywzOPCg__oer4T0N8DSaEQ",
+  authDomain: "folio-app-bef5d.firebaseapp.com",
+  projectId: "folio-app-bef5d",
+  storageBucket: "folio-app-bef5d.firebasestorage.app",
+  messagingSenderId: "74190229536",
+  appId: "1:74190229536:web:969451373db5e008e0ec45",
+  measurementId: "G-3466YTEQD5",
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const googleProvider = new GoogleAuthProvider();
 
 /* ═══════════════════════════════════════════════════════════
    GLOBAL STYLES
@@ -253,37 +278,62 @@ function Tag({ children, color = "var(--text3)" }) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   AUTH SCREEN
+   AUTH SCREEN  (Firebase)
 ═══════════════════════════════════════════════════════════ */
 function AuthScreen({ onLogin }) {
-  const [mode, setMode] = useState("login"); // login | signup
+  const [mode, setMode] = useState("login");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
 
-  const handle = async () => {
-    setError(""); setLoading(true);
-    await new Promise(r => setTimeout(r, 900));
-    if (!email || !password) { setError("Please fill in all fields."); setLoading(false); return; }
-    if (mode === "signup" && !name) { setError("Please enter your name."); setLoading(false); return; }
-    if (password.length < 6) { setError("Password must be at least 6 characters."); setLoading(false); return; }
-    const user = {
-      name: mode === "signup" ? name : (email.split("@")[0].charAt(0).toUpperCase() + email.split("@")[0].slice(1)),
-      email,
-      avatar: (mode === "signup" ? name : email).charAt(0).toUpperCase(),
-      joinedDate: new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" }),
-      goodreadsConnected: false,
-      yearGoal: 24,
+  const friendlyError = (code) => {
+    const map = {
+      "auth/user-not-found":       "No account found with that email.",
+      "auth/wrong-password":       "Incorrect password. Please try again.",
+      "auth/email-already-in-use": "An account with that email already exists.",
+      "auth/weak-password":        "Password must be at least 6 characters.",
+      "auth/invalid-email":        "Please enter a valid email address.",
+      "auth/popup-closed-by-user": "Google sign-in was cancelled.",
+      "auth/network-request-failed": "Network error. Check your connection.",
+      "auth/invalid-credential":   "Invalid email or password.",
     };
+    return map[code] || "Something went wrong. Please try again.";
+  };
+
+  const handleEmail = async () => {
+    setError(""); setLoading(true);
+    try {
+      if (mode === "signup") {
+        if (!name.trim()) { setError("Please enter your name."); setLoading(false); return; }
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        await updateProfile(cred.user, { displayName: name.trim() });
+        onLogin(cred.user);
+      } else {
+        const cred = await signInWithEmailAndPassword(auth, email, password);
+        onLogin(cred.user);
+      }
+    } catch (e) {
+      setError(friendlyError(e.code));
+    }
     setLoading(false);
-    onLogin(user);
+  };
+
+  const handleGoogle = async () => {
+    setError(""); setGoogleLoading(true);
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      onLogin(cred.user);
+    } catch (e) {
+      setError(friendlyError(e.code));
+    }
+    setGoogleLoading(false);
   };
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, position: "relative", overflow: "hidden" }}>
-      {/* Background orbs */}
       <div style={{ position: "fixed", top: "-20%", left: "-10%", width: 500, height: 500, background: "radial-gradient(circle, rgba(201,168,76,0.06) 0%, transparent 70%)", pointerEvents: "none" }} />
       <div style={{ position: "fixed", bottom: "-20%", right: "-10%", width: 600, height: 600, background: "radial-gradient(circle, rgba(76,201,201,0.04) 0%, transparent 70%)", pointerEvents: "none" }} />
       <div style={{ position: "fixed", top: "40%", right: "20%", width: 300, height: 300, background: "radial-gradient(circle, rgba(124,92,191,0.05) 0%, transparent 70%)", pointerEvents: "none" }} />
@@ -302,8 +352,9 @@ function AuthScreen({ onLogin }) {
 
         {/* Card */}
         <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 16, padding: 32, backdropFilter: "blur(20px)", boxShadow: "0 24px 80px rgba(0,0,0,0.6)" }}>
+
           {/* Toggle */}
-          <div style={{ display: "flex", background: "var(--bg)", borderRadius: 8, padding: 3, marginBottom: 28, border: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", background: "var(--bg)", borderRadius: 8, padding: 3, marginBottom: 24, border: "1px solid var(--border)" }}>
             {[["login","Sign In"],["signup","Create Account"]].map(([m, label]) => (
               <button key={m} onClick={() => { setMode(m); setError(""); }} style={{
                 flex: 1, padding: "8px 0", borderRadius: 6, fontSize: 12, fontWeight: 600, letterSpacing: "0.5px",
@@ -315,6 +366,35 @@ function AuthScreen({ onLogin }) {
             ))}
           </div>
 
+          {/* Google button */}
+          <button onClick={handleGoogle} disabled={googleLoading || loading}
+            style={{ width: "100%", padding: "12px 0", marginBottom: 16, borderRadius: 8,
+              background: "var(--bg2)", border: "1px solid var(--border2)",
+              color: "var(--text)", fontSize: 13, fontWeight: 600,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+              cursor: "pointer", transition: "all 0.2s", opacity: (googleLoading || loading) ? 0.7 : 1 }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.25)"; e.currentTarget.style.background = "var(--bg3)"; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border2)"; e.currentTarget.style.background = "var(--bg2)"; }}>
+            {googleLoading ? <Spinner /> : (
+              <svg width="18" height="18" viewBox="0 0 48 48">
+                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                <path fill="none" d="M0 0h48v48H0z"/>
+              </svg>
+            )}
+            {googleLoading ? "Connecting…" : `${mode === "login" ? "Sign in" : "Sign up"} with Google`}
+          </button>
+
+          {/* Divider */}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+            <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+            <span style={{ fontSize: 10, color: "var(--text3)", fontFamily: "'JetBrains Mono', monospace", letterSpacing: "1px" }}>OR EMAIL</span>
+            <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+          </div>
+
+          {/* Email fields */}
           {mode === "signup" && (
             <div style={{ marginBottom: 14 }}>
               <label style={{ fontSize: 10, color: "var(--text3)", display: "block", marginBottom: 6, fontFamily: "'JetBrains Mono', monospace", letterSpacing: "1px", textTransform: "uppercase" }}>Full Name</label>
@@ -324,14 +404,14 @@ function AuthScreen({ onLogin }) {
 
           <div style={{ marginBottom: 14 }}>
             <label style={{ fontSize: 10, color: "var(--text3)", display: "block", marginBottom: 6, fontFamily: "'JetBrains Mono', monospace", letterSpacing: "1px", textTransform: "uppercase" }}>Email</label>
-            <input className="input-field" type="email" placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && handle()} />
+            <input className="input-field" type="email" placeholder="you@example.com" value={email}
+              onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && handleEmail()} />
           </div>
 
           <div style={{ marginBottom: 20 }}>
             <label style={{ fontSize: 10, color: "var(--text3)", display: "block", marginBottom: 6, fontFamily: "'JetBrains Mono', monospace", letterSpacing: "1px", textTransform: "uppercase" }}>Password</label>
-            <input className="input-field" type="password" placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && handle()} />
+            <input className="input-field" type="password" placeholder="••••••••" value={password}
+              onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && handleEmail()} />
           </div>
 
           {error && (
@@ -340,9 +420,9 @@ function AuthScreen({ onLogin }) {
             </div>
           )}
 
-          <button className="btn-gold" onClick={handle} disabled={loading}
-            style={{ width: "100%", padding: "13px 0", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-            {loading ? <Spinner /> : (mode === "login" ? "Sign In to Folio" : "Create My Account")}
+          <button className="btn-gold" onClick={handleEmail} disabled={loading || googleLoading}
+            style={{ width: "100%", padding: "13px 0", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, opacity: (loading || googleLoading) ? 0.7 : 1 }}>
+            {loading ? <Spinner /> : (mode === "login" ? "Sign In with Email" : "Create Account")}
           </button>
 
           <GoldDivider />
@@ -962,13 +1042,36 @@ function MiniBar({ data }) {
 ═══════════════════════════════════════════════════════════ */
 export default function Folio() {
   const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true); // wait for Firebase to check session
   const [tab, setTab] = useState("dashboard");
   const [quote, setQuote] = useState(getFallbackQuote());
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteMood, setQuoteMood] = useState("");
   const [quoteHistory, setQuoteHistory] = useState([]);
 
-  // Fetch AI quote on first load
+  // Listen to Firebase auth state — persists across page refreshes
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser) {
+        setUser({
+          name: firebaseUser.displayName || firebaseUser.email.split("@")[0],
+          email: firebaseUser.email,
+          avatar: (firebaseUser.displayName || firebaseUser.email).charAt(0).toUpperCase(),
+          photoURL: firebaseUser.photoURL,
+          joinedDate: new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" }),
+          goodreadsConnected: false,
+          yearGoal: 24,
+          uid: firebaseUser.uid,
+        });
+      } else {
+        setUser(null);
+      }
+      setAuthLoading(false);
+    });
+    return () => unsub();
+  }, []);
+
+  // Fetch AI quote once user logs in
   useEffect(() => {
     if (!user) return;
     setQuoteLoading(true);
@@ -976,7 +1079,7 @@ export default function Folio() {
       if (q) { setQuote(q); setQuoteHistory([q]); }
       setQuoteLoading(false);
     });
-  }, [user]);
+  }, [user?.uid]);
 
   const handleNewQuote = async (mood = "") => {
     setQuoteLoading(true);
@@ -987,6 +1090,15 @@ export default function Folio() {
       setQuoteHistory(prev => [q, ...prev].slice(0, 10));
     }
     setQuoteLoading(false);
+  };
+
+  const handleFirebaseLogin = (firebaseUser) => {
+    // onAuthStateChanged will pick this up automatically — no manual setUser needed
+  };
+
+  const handleLogout = async () => {
+    await signOut(auth);
+    setUser(null);
   };
   const [readingBooks, setReadingBooks] = useState(DEMO_READING);
   const [readBooks, setReadBooks] = useState(DEMO_READ);
@@ -1049,11 +1161,22 @@ export default function Folio() {
     { id: "quote",     icon: "✦",  label: "Quote" },
   ];
 
+  // Show loading spinner while Firebase checks session
+  if (authLoading) return (
+    <>
+      <style>{GLOBAL_CSS}</style>
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 20 }}>
+        <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 36, color: "var(--gold)", letterSpacing: 6, animation: "glow 2s ease-in-out infinite" }}>FOLIO</div>
+        <div style={{ width: 24, height: 24, border: "2px solid rgba(201,168,76,0.2)", borderTopColor: "var(--gold)", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+      </div>
+    </>
+  );
+
   // Show auth screen if not logged in
   if (!user) return (
     <>
       <style>{GLOBAL_CSS}</style>
-      <AuthScreen onLogin={u => setUser({ ...u, yearGoal: 24 })} />
+      <AuthScreen onLogin={handleFirebaseLogin} />
     </>
   );
 
@@ -1088,7 +1211,7 @@ export default function Folio() {
             user={user}
             onUpdate={u => setUser(u)}
             onClose={() => setSettingsOpen(false)}
-            onLogout={() => { setUser(null); setSettingsOpen(false); }}
+            onLogout={() => { handleLogout(); setSettingsOpen(false); }}
             initialTab={settingsTab}
           />
         )}
@@ -1105,7 +1228,7 @@ export default function Folio() {
               <button onClick={() => setAddOpen(true)} className="btn-gold" style={{ padding: "8px 16px", fontSize: 11, display: "flex", alignItems: "center", gap: 6, letterSpacing: "0.5px" }}>
                 <span style={{ fontSize: 14, lineHeight: 1 }}>+</span> Add Book
               </button>
-              <UserMenu user={user} onSettings={openSettings} onLogout={() => setUser(null)} />
+              <UserMenu user={user} onSettings={openSettings} onLogout={handleLogout} />
             </div>
           </div>
         </div>
