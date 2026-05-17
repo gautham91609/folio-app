@@ -5,6 +5,9 @@ import {
   createUserWithEmailAndPassword, signInWithPopup,
   GoogleAuthProvider, signOut, updateProfile,
 } from "firebase/auth";
+import {
+  getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot,
+} from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyC-9-HjxA_mRywzOPCg__oer4T0N8DSaEQ",
@@ -17,7 +20,24 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
 const googleProvider = new GoogleAuthProvider();
+
+/* ─── FIRESTORE HELPERS ─────────────────────────────────── */
+// Each user gets a single document: users/{uid}
+// Shape: { reading: [...], read: [...], want: [...], yearGoal: 24 }
+async function loadUserData(uid) {
+  try {
+    const snap = await getDoc(doc(db, "users", uid));
+    return snap.exists() ? snap.data() : null;
+  } catch(e) { console.error("loadUserData", e); return null; }
+}
+
+async function saveUserData(uid, data) {
+  try {
+    await setDoc(doc(db, "users", uid), data, { merge: true });
+  } catch(e) { console.error("saveUserData", e); }
+}
 
 /* ─── STYLES ─────────────────────────────────────────────── */
 const CSS = `
@@ -81,21 +101,18 @@ function fallbackQuote() {
   return FALLBACK_QUOTES[(t.getFullYear() * 1000 + d) % FALLBACK_QUOTES.length];
 }
 async function fetchAIQuote(mood = "") {
-  const moods = ["inspiring","philosophical","humorous","poetic","motivational","contemplative","adventurous","timeless"];
-  const pick = mood || moods[Math.floor(Math.random() * moods.length)];
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514", max_tokens: 1000,
-        messages: [{ role: "user", content: `Generate one unique ${pick} quote about reading or books from a real author or thinker. Prefer lesser-known voices. Return ONLY valid JSON: {"text":"quote here","author":"Full Name","context":"one sentence about who they were"}` }]
-      })
+    const res = await fetch("/api/quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mood: mood || "" }),
     });
+    if (!res.ok) throw new Error("API error");
     const data = await res.json();
-    const raw = data.content?.[0]?.text?.trim().replace(/```json|```/g, "").trim() || "";
-    const p = JSON.parse(raw);
-    if (p.text && p.author) return p;
-  } catch {}
+    if (data?.text && data?.author) return data;
+  } catch (e) {
+    console.error("Quote fetch failed:", e);
+  }
   return null;
 }
 
@@ -849,30 +866,64 @@ const MONTHLY = [{ month: "Jan", pages: 0 },{ month: "Feb", pages: 0 },{ month: 
 
 export default function Folio() {
   const [user, setUser] = useState(null), [authLoading, setAuthLoading] = useState(true);
+  const [dataLoading, setDataLoading] = useState(false);
   const [tab, setTab] = useState("dashboard");
   const [quote, setQuote] = useState(fallbackQuote()), [qLoading, setQLoading] = useState(false), [qMood, setQMood] = useState(""), [qHistory, setQHistory] = useState([]);
   const [reading, setReading] = useState([]), [read, setRead] = useState([]), [want, setWant] = useState([]);
+  const [yearGoal, setYearGoal] = useState(24);
   const [logTarget, setLogTarget] = useState(null), [addOpen, setAddOpen] = useState(false), [settingsOpen, setSettingsOpen] = useState(false), [settingsTab, setSettingsTab] = useState("account");
   const [notif, setNotif] = useState(null);
+  const saveTimeout = useRef(null);
 
+  // ── Auth listener ─────────────────────────────────────────
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, fu => {
-      if (fu) setUser({ name: fu.displayName||fu.email.split("@")[0], email: fu.email, avatar: (fu.displayName||fu.email).charAt(0).toUpperCase(), photoURL: fu.photoURL, joinedDate: new Date().toLocaleDateString("en-US",{month:"long",year:"numeric"}), goodreadsConnected: false, yearGoal: 24, uid: fu.uid });
-      else setUser(null);
+    const unsub = onAuthStateChanged(auth, async fu => {
+      if (fu) {
+        setUser({ name: fu.displayName||fu.email.split("@")[0], email: fu.email, avatar: (fu.displayName||fu.email).charAt(0).toUpperCase(), photoURL: fu.photoURL, joinedDate: new Date().toLocaleDateString("en-US",{month:"long",year:"numeric"}), uid: fu.uid });
+        // Load persisted data from Firestore
+        setDataLoading(true);
+        const data = await loadUserData(fu.uid);
+        if (data) {
+          if (data.reading)  setReading(data.reading);
+          if (data.read)     setRead(data.read);
+          if (data.want)     setWant(data.want);
+          if (data.yearGoal) setYearGoal(data.yearGoal);
+        }
+        setDataLoading(false);
+      } else {
+        setUser(null);
+        setReading([]); setRead([]); setWant([]);
+      }
       setAuthLoading(false);
     });
     return () => unsub();
   }, []);
 
+  // ── Debounced save to Firestore whenever books change ─────
+  const persistData = useCallback((r, rd, w, goal) => {
+    if (!auth.currentUser) return;
+    if (saveTimeout.current) clearTimeout(saveTimeout.current);
+    saveTimeout.current = setTimeout(() => {
+      saveUserData(auth.currentUser.uid, { reading: r, read: rd, want: w, yearGoal: goal });
+    }, 800); // debounce: wait 800ms after last change before writing
+  }, []);
+
+  useEffect(() => { persistData(reading, read, want, yearGoal); }, [reading, read, want, yearGoal]);
+
   useEffect(() => {
     if (!user) return;
+    // Always fetch a fresh quote on login, re-login, or page load
     setQLoading(true);
-    fetchAIQuote().then(q => { if (q) { setQuote(q); setQHistory([q]); } setQLoading(false); });
-  }, [user?.uid]);
+    setQHistory([]);
+    fetchAIQuote().then(q => {
+      if (q) { setQuote(q); setQHistory([q]); }
+      setQLoading(false);
+    });
+  }, [user?.uid]); // fires whenever uid changes (login, logout+login, page load)
 
   const newQuote = async (mood = "") => { setQLoading(true); setQMood(mood); const q = await fetchAIQuote(mood); if (q) { setQuote(q); setQHistory(p => [q,...p].slice(0,10)); } setQLoading(false); };
-  const notify = useCallback(msg => { setNotif(msg); setTimeout(() => setNotif(null), 3000); }, []);
-  const handleLogout = async () => { await signOut(auth); };
+  const notify = useCallback(msg => { setNotif(msg); setTimeout(() => setNotif(null), 3500); }, []);
+  const handleLogout = async () => { await signOut(auth); setReading([]); setRead([]); setWant([]); };
 
   const handleLogSave = (id, newPage, pagesLogged) => {
     const dt = today(); let finished = null;
@@ -939,16 +990,17 @@ export default function Folio() {
   };
   const openSettings = (t = "account") => { setSettingsTab(t); setSettingsOpen(true); };
 
-  const booksRead = read.length, yearGoal = user?.yearGoal||24, goalPct = Math.min(100, Math.round((booksRead/yearGoal)*100));
+  const booksRead = read.length, goalPct = Math.min(100, Math.round((booksRead/yearGoal)*100));
   const totalPages = read.reduce((a,b) => a+(b.pages||0), 0) + reading.reduce((a,b) => a+(b.currentPage||0), 0);
 
   const TABS = [{ id:"dashboard",icon:"◈",label:"Home" },{ id:"reading",icon:"◎",label:"Reading" },{ id:"shelves",icon:"⊟",label:"Shelves" },{ id:"discover",icon:"✦",label:"Discover" }];
 
-  if (authLoading) return (
+  if (authLoading || dataLoading) return (
     <><style>{CSS}</style>
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 20 }}>
         <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 36, color: "var(--gold)", letterSpacing: 6, animation: "glow 2s ease-in-out infinite" }}>FOLIO</div>
         <Spinner size={24} />
+        {dataLoading && <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "'JetBrains Mono',monospace", letterSpacing: "2px" }}>LOADING YOUR LIBRARY...</div>}
       </div>
     </>
   );
@@ -967,7 +1019,7 @@ export default function Folio() {
 
         {logTarget && <LogModal book={logTarget} onSave={handleLogSave} onClose={() => setLogTarget(null)} />}
         {addOpen && <AddBookModal onAdd={handleAdd} onClose={() => setAddOpen(false)} />}
-        {settingsOpen && <SettingsModal user={user} onUpdate={u => setUser(u)} onClose={() => setSettingsOpen(false)} onLogout={() => { handleLogout(); setSettingsOpen(false); }} initialTab={settingsTab} onImport={handleGoodreadsImport} />}
+        {settingsOpen && <SettingsModal user={user} onUpdate={u => { setUser(u); if (u.yearGoal) setYearGoal(u.yearGoal); }} onClose={() => setSettingsOpen(false)} onLogout={() => { handleLogout(); setSettingsOpen(false); }} initialTab={settingsTab} onImport={handleGoodreadsImport} />}
 
         {/* Header */}
         <div style={{ padding: "14px 18px", background: "rgba(5,5,8,0.94)", borderBottom: "1px solid var(--border)", position: "sticky", top: 0, zIndex: 50, backdropFilter: "blur(20px)" }}>
