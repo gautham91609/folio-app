@@ -99,6 +99,35 @@ async function fetchAIQuote(mood = "") {
   return null;
 }
 
+// Fetch a cover URL for a single book by title + author from Open Library
+async function fetchCoverForBook(title, author) {
+  try {
+    const q = encodeURIComponent(`${title} ${author}`.trim());
+    const res = await fetch(`https://openlibrary.org/search.json?q=${q}&limit=1&fields=cover_i`);
+    const data = await res.json();
+    const coverId = data.docs?.[0]?.cover_i;
+    return coverId ? `https://covers.openlibrary.org/b/id/${coverId}-M.jpg` : null;
+  } catch { return null; }
+}
+
+// Fetch covers for an array of books in batches — returns updated books array
+// Fires requests in parallel but rate-limits to avoid hammering Open Library
+async function enrichBooksWithCovers(books, onProgress) {
+  const BATCH = 5; // parallel requests per batch
+  const result = [...books];
+  for (let i = 0; i < result.length; i += BATCH) {
+    const batch = result.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (book, bi) => {
+      const url = await fetchCoverForBook(book.title, book.author);
+      if (url) result[i + bi] = { ...result[i + bi], coverUrl: url };
+    }));
+    if (onProgress) onProgress(Math.min(i + BATCH, result.length), result.length);
+    // Small delay between batches to be polite to Open Library
+    if (i + BATCH < result.length) await new Promise(r => setTimeout(r, 300));
+  }
+  return result;
+}
+
 async function searchOpenLibrary(query) {
   if (!query || query.trim().length < 2) return [];
   try {
@@ -865,12 +894,13 @@ export default function Folio() {
   const handleAdd = (book, shelf) => { if (shelf==="reading") { setReading(p => [...p, book]); notify("Added to Reading!"); setTab("reading"); } else { setWant(p => [...p, book]); notify("Added to Want to Read!"); } };
   const handleRate = (id, rating) => setRead(p => p.map(b => b.id===id ? {...b, rating} : b));
   const handleMoveToReading = book => { setWant(p => p.filter(b => b.id !== book.id)); setReading(p => [...p, { ...book, currentPage: 0, sessions: [] }]); setTab("reading"); notify(`Started reading "${book.title}"!`); };
-  const handleGoodreadsImport = ({ reading: r, read: rd, wantToRead: w }) => {
+  const handleGoodreadsImport = async ({ reading: r, read: rd, wantToRead: w }) => {
     const total = r.length + rd.length + w.length;
     if (total === 0) {
       notify("No books found — check the CSV format");
       return;
     }
+    // First: load books immediately without covers so user sees them right away
     setReading(p => [...p, ...r]);
     setRead(p => [...p, ...rd]);
     setWant(p => [...p, ...w]);
@@ -878,9 +908,34 @@ export default function Folio() {
     if (r.length) parts.push(`${r.length} reading`);
     if (rd.length) parts.push(`${rd.length} read`);
     if (w.length) parts.push(`${w.length} want to read`);
-    notify(`Imported: ${parts.join(", ")}!`);
+    notify(`Imported ${total} books! Fetching covers...`);
     setSettingsOpen(false);
     setTab("shelves");
+
+    // Second: fetch covers in the background and update state as they come in
+    const allBooks = [...r, ...rd, ...w];
+    let fetched = 0;
+    const BATCH = 4;
+    for (let i = 0; i < allBooks.length; i += BATCH) {
+      const batch = allBooks.slice(i, i + BATCH);
+      await Promise.all(batch.map(async (book) => {
+        const url = await fetchCoverForBook(book.title, book.author);
+        if (url) {
+          // Update whichever shelf this book is on
+          const updater = prev => prev.map(b => b.id === book.id ? { ...b, coverUrl: url } : b);
+          setReading(updater);
+          setRead(updater);
+          setWant(updater);
+        }
+        fetched++;
+      }));
+      // Progress notification every 10 books
+      if (fetched % 10 === 0 && fetched < allBooks.length) {
+        notify(`Loading covers... ${fetched}/${allBooks.length}`);
+      }
+      if (i + BATCH < allBooks.length) await new Promise(res => setTimeout(res, 250));
+    }
+    notify(`✓ All covers loaded for ${total} books!`);
   };
   const openSettings = (t = "account") => { setSettingsTab(t); setSettingsOpen(true); };
 
