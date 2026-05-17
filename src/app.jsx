@@ -115,43 +115,71 @@ async function searchOpenLibrary(query) {
   } catch { return []; }
 }
 
-// Parse Goodreads CSV export
-function parseGoodreadsCSV(text) {
-  const lines = text.split("\n").filter(l => l.trim());
-  if (lines.length < 2) return { reading: [], read: [], wantToRead: [] };
-  const headers = lines[0].split(",").map(h => h.replace(/"/g, "").trim());
-  const idx = (name) => headers.findIndex(h => h.toLowerCase().includes(name.toLowerCase()));
-  const titleIdx   = idx("title");
-  const authorIdx  = idx("author");
-  const pagesIdx   = idx("pages");
-  const shelfIdx   = idx("exclusive shelf");
-  const ratingIdx  = idx("my rating");
-  const dateIdx    = idx("date read");
+// Robust CSV field parser — handles quoted fields, commas inside quotes, escaped quotes
+function parseCSVRow(row) {
+  const fields = [];
+  let cur = "", inQuote = false;
+  for (let i = 0; i < row.length; i++) {
+    const ch = row[i];
+    if (ch === '"') {
+      if (inQuote && row[i + 1] === '"') { cur += '"'; i++; }
+      else inQuote = !inQuote;
+    } else if (ch === ',' && !inQuote) {
+      fields.push(cur.trim()); cur = "";
+    } else { cur += ch; }
+  }
+  fields.push(cur.trim());
+  return fields;
+}
+
+// Parse Goodreads CSV export — handles all edge cases
+function parseGoodreadsCSV(rawText) {
+  const text = rawText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  // Split into rows respecting quoted newlines
+  const rows = [];
+  let cur = "", inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') { if (inQ && text[i+1] === '"') { cur += '""'  ; i++; } else inQ = !inQ; cur += ch; }
+    else if (ch === '\n' && !inQ) { if (cur.trim()) rows.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  if (cur.trim()) rows.push(cur);
+  if (rows.length < 2) return { reading: [], read: [], wantToRead: [] };
+
+  const headers = parseCSVRow(rows[0]).map(h => h.replace(/"/g,"").toLowerCase().trim());
+  const find = (...names) => { for (const n of names) { const i = headers.findIndex(h => h === n || h.includes(n)); if (i !== -1) return i; } return -1; };
+
+  const TI = find("title");
+  const AI = find("author");
+  const PI = find("number of pages", "pages");
+  const SI = find("exclusive shelf", "bookshelves");
+  const RI = find("my rating", "rating");
+  const DI = find("date read");
+
   const books = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].match(/(".*?"|[^,]+)(?=,|$)/g) || [];
-    const get = (ix) => (cols[ix] || "").replace(/"/g, "").trim();
-    if (!get(titleIdx)) continue;
+  for (let i = 1; i < rows.length; i++) {
+    const cols = parseCSVRow(rows[i]);
+    const get = ix => (ix >= 0 && ix < cols.length) ? cols[ix].replace(/^"|"$/g,"").replace(/""/g,'"').trim() : "";
+    const title = get(TI);
+    if (!title) continue;
+    const shelf = get(SI).toLowerCase().trim();
     books.push({
-      id: Date.now() + i,
-      title: get(titleIdx),
-      author: get(authorIdx),
-      pages: parseInt(get(pagesIdx)) || 300,
-      currentPage: 0,
-      shelf: get(shelfIdx),
-      rating: parseInt(get(ratingIdx)) || 0,
-      finishedDate: get(dateIdx) || null,
-      coverUrl: null,
-      genre: "General",
-      sessions: [],
-      addedDate: today(),
-      fromGoodreads: true,
+      id: Date.now() + i + Math.random(),
+      title: title.replace(/\s*\(.*?\)\s*$/, "").trim() || title,
+      author: get(AI),
+      pages: parseInt(get(PI)) || 300,
+      currentPage: 0, shelf,
+      rating: parseInt(get(RI)) || 0,
+      finishedDate: get(DI) || null,
+      coverUrl: null, genre: "General",
+      sessions: [], addedDate: today(), fromGoodreads: true,
     });
   }
   return {
-    reading:    books.filter(b => b.shelf === "currently-reading"),
+    reading:    books.filter(b => b.shelf === "currently-reading" || b.shelf.includes("current")),
     read:       books.filter(b => b.shelf === "read"),
-    wantToRead: books.filter(b => b.shelf === "to-read"),
+    wantToRead: books.filter(b => b.shelf === "to-read" || b.shelf.includes("want")),
   };
 }
 
@@ -558,13 +586,22 @@ function GoodreadsImport({ onImport }) {
     setLoading(true);
     const reader = new FileReader();
     reader.onload = e => {
-      const result = parseGoodreadsCSV(e.target.result);
-      const total = result.reading.length + result.read.length + result.wantToRead.length;
-      onImport(result);
-      setDone(total);
+      try {
+        const result = parseGoodreadsCSV(e.target.result);
+        const total = result.reading.length + result.read.length + result.wantToRead.length;
+        if (total === 0) {
+          alert("No books were found in this file. Make sure you uploaded the Goodreads export CSV (goodreads_library_export.csv).");
+          setLoading(false);
+          return;
+        }
+        onImport(result);
+        setDone({ total, reading: result.reading.length, read: result.read.length, want: result.wantToRead.length });
+      } catch(err) {
+        alert("Could not read the file. Make sure it is the Goodreads CSV export.");
+      }
       setLoading(false);
     };
-    reader.readAsText(file);
+    reader.readAsText(file, "UTF-8");
   };
   return (
     <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 14, padding: 20 }}>
@@ -575,9 +612,14 @@ function GoodreadsImport({ onImport }) {
       {done !== null ? (
         <div style={{ padding: "14px 16px", background: "rgba(76,175,130,0.1)", border: "1px solid rgba(76,175,130,0.3)", borderRadius: 10, textAlign: "center" }}>
           <div style={{ fontSize: 20, marginBottom: 6 }}>🎉</div>
-          <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 16, color: "var(--ok)", marginBottom: 4 }}>{done} books imported!</div>
-          <div style={{ fontSize: 11, color: "var(--text3)" }}>Your real Goodreads shelves are now loaded.</div>
-          <button onClick={() => setDone(null)} style={{ color: "var(--gold)", fontSize: 11, marginTop: 10, fontFamily: "'JetBrains Mono',monospace" }}>Import again</button>
+          <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 18, color: "var(--ok)", marginBottom: 8 }}>{done.total} books imported!</div>
+          <div style={{ display: "flex", justifyContent: "center", gap: 12, marginBottom: 8 }}>
+            {done.reading > 0 && <div style={{ fontSize: 11, color: "var(--text2)" }}>📖 {done.reading} reading</div>}
+            {done.read > 0 && <div style={{ fontSize: 11, color: "var(--text2)" }}>✓ {done.read} read</div>}
+            {done.want > 0 && <div style={{ fontSize: 11, color: "var(--text2)" }}>🔖 {done.want} want to read</div>}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 10 }}>Go to Shelves to see your library.</div>
+          <button onClick={() => setDone(null)} style={{ color: "var(--gold)", fontSize: 11, fontFamily: "'JetBrains Mono',monospace" }}>Import again</button>
         </div>
       ) : (
         <>
@@ -823,7 +865,23 @@ export default function Folio() {
   const handleAdd = (book, shelf) => { if (shelf==="reading") { setReading(p => [...p, book]); notify("Added to Reading!"); setTab("reading"); } else { setWant(p => [...p, book]); notify("Added to Want to Read!"); } };
   const handleRate = (id, rating) => setRead(p => p.map(b => b.id===id ? {...b, rating} : b));
   const handleMoveToReading = book => { setWant(p => p.filter(b => b.id !== book.id)); setReading(p => [...p, { ...book, currentPage: 0, sessions: [] }]); setTab("reading"); notify(`Started reading "${book.title}"!`); };
-  const handleGoodreadsImport = ({ reading: r, read: rd, wantToRead: w }) => { setReading(p => [...p, ...r]); setRead(p => [...p, ...rd]); setWant(p => [...p, ...w]); notify(`Goodreads library imported!`); setSettingsOpen(false); };
+  const handleGoodreadsImport = ({ reading: r, read: rd, wantToRead: w }) => {
+    const total = r.length + rd.length + w.length;
+    if (total === 0) {
+      notify("No books found — check the CSV format");
+      return;
+    }
+    setReading(p => [...p, ...r]);
+    setRead(p => [...p, ...rd]);
+    setWant(p => [...p, ...w]);
+    const parts = [];
+    if (r.length) parts.push(`${r.length} reading`);
+    if (rd.length) parts.push(`${rd.length} read`);
+    if (w.length) parts.push(`${w.length} want to read`);
+    notify(`Imported: ${parts.join(", ")}!`);
+    setSettingsOpen(false);
+    setTab("shelves");
+  };
   const openSettings = (t = "account") => { setSettingsTab(t); setSettingsOpen(true); };
 
   const booksRead = read.length, yearGoal = user?.yearGoal||24, goalPct = Math.min(100, Math.round((booksRead/yearGoal)*100));
